@@ -20,6 +20,7 @@ namespace GooglePlayServices
     using System.Collections.Generic;
     using System.IO;
     using System.Text.RegularExpressions;
+    using System.Xml;
     using Google.JarResolver;
     using UnityEditor;
     using UnityEngine;
@@ -35,6 +36,145 @@ namespace GooglePlayServices
     [InitializeOnLoad]
     public class PlayServicesResolver : AssetPostprocessor
     {
+        /// <summary>
+        /// Saves the current state of dependencies in the project and allows the caller to
+        /// compare the current state vs. the previous state of dependencies in the project.
+        /// </summary>
+        internal class DependencyState {
+            /// <summary>
+            /// Set of dependencies and the expected files in the project.
+            /// </summary>
+            private static string DEPENDENCY_STATE_FILE = Path.Combine(
+                "ProjectSettings", "AndroidResolverDependencies.xml");
+
+            /// <summary>
+            /// Set of Android packages (AARs / JARs) referenced by this DependencyState.
+            /// These are in the Maven style format "group:artifact:version".
+            /// </summary>
+            public HashSet<string> Packages { get; internal set; }
+
+            /// <summary>
+            /// Set of files referenced by this DependencyState.
+            /// </summary>
+            public HashSet<string> Files { get; internal set; }
+
+            /// <summary>
+            /// Determine the current state of the project.
+            /// </summary>
+            /// <returns>DependencyState instance with data derived from the current
+            /// project.</returns>
+            public static DependencyState GetState() {
+                return new DependencyState {
+                    Packages = new HashSet<string>(PlayServicesSupport.GetAllDependencies().Keys),
+                    Files = new HashSet<string>(PlayServicesResolver.FindLabeledAssets())
+                };
+            }
+
+            /// <summary>
+            /// Sort a string hashset.
+            /// </summary>
+            /// <param name="setToSort">Set to sort and return via an enumerable.</param>
+            private IEnumerable<string> SortSet(HashSet<string> setToSort) {
+                var sorted = new SortedDictionary<string, bool>();
+                foreach (var value in setToSort) sorted[value] = true;
+                return sorted.Keys;
+            }
+
+            /// <summary>
+            /// Write this object to DEPENDENCY_STATE_FILE.
+            /// </summary>
+            public void WriteToFile() {
+                Directory.CreateDirectory(Path.GetDirectoryName(DEPENDENCY_STATE_FILE));
+                using (var writer = new XmlTextWriter(new StreamWriter(DEPENDENCY_STATE_FILE)) {
+                        Formatting = Formatting.Indented,
+                    }) {
+                    writer.WriteStartElement("dependencies");
+                    writer.WriteStartElement("packages");
+                    foreach (var dependencyKey in SortSet(Packages)) {
+                        writer.WriteStartElement("package");
+                        writer.WriteValue(dependencyKey);
+                        writer.WriteEndElement();
+                    }
+                    writer.WriteEndElement();
+                    writer.WriteStartElement("files");
+                    foreach (var assetPath in SortSet(Files)) {
+                        writer.WriteStartElement("file");
+                        writer.WriteValue(assetPath);
+                        writer.WriteEndElement();
+                    }
+                    writer.WriteEndElement();
+                    writer.WriteEndElement();
+                    writer.Flush();
+                    writer.Close();
+                }
+            }
+
+            /// <summary>
+            /// Read the state from DEPENDENCY_STATE_FILE.
+            /// </summary>
+            /// <returns>DependencyState instance read from DEPENDENCY_STATE_FILE.  null is
+            /// returned if the file isn't found.</returns>
+            ///
+            /// This parses files in the following format:
+            /// <dependencies>
+            ///   <packages>
+            ///     <package>group:artifact:version</package>
+            ///     ...
+            ///   </packages>
+            ///   <files>
+            ///     <file>package_filename</file>
+            ///     ...
+            ///   </files>
+            /// </dependencies>
+            public static DependencyState ReadFromFile() {
+                var packages = new HashSet<string>();
+                var files = new HashSet<string>();
+                if (!XmlUtilities.ParseXmlTextFileElements(
+                    DEPENDENCY_STATE_FILE, PlayServicesSupport.Log,
+                    (reader, elementName, isStart, parentElementName, elementNameStack) => {
+                        if (isStart) {
+                            if (elementName == "dependencies" && parentElementName == "") {
+                                return true;
+                            } else if ((elementName == "packages" || elementName == "files") &&
+                                       parentElementName == "dependencies") {
+                                return true;
+                            } else if (elementName == "package" &&
+                                       parentElementName == "packages") {
+                                if (isStart && reader.Read() &&
+                                    reader.NodeType == XmlNodeType.Text) {
+                                    packages.Add(reader.ReadContentAsString());
+                                }
+                                return true;
+                            } else if (elementName == "file" && parentElementName == "files") {
+                                if (isStart && reader.Read() &&
+                                    reader.NodeType == XmlNodeType.Text) {
+                                    files.Add(reader.ReadContentAsString());
+                                }
+                                return true;
+                            }
+                        }
+                        return false;
+                    })) {
+                    return null;
+                }
+                return new DependencyState {
+                    Packages = packages,
+                    Files = files
+                };
+            }
+
+            /// <summary>
+            /// Compare with this object.
+            /// </summary>
+            /// <param name="obj">Object to compare with.</param>
+            /// <returns>true if both objects have the same contents, false otherwise.</returns>
+            public override bool Equals(System.Object obj) {
+                var state = obj as DependencyState;
+                return state != null && Packages.SetEquals(state.Packages) &&
+                    Files.SetEquals(state.Files);
+            }
+        }
+
         /// <summary>
         /// The instance to the play services support object.
         /// </summary>
@@ -55,6 +195,10 @@ namespace GooglePlayServices
         private static Dictionary<ResolverType, IResolver> _resolvers =
             new Dictionary<ResolverType, IResolver>();
 
+        /// <summary>
+        /// Queue of resolution jobs to execute.
+        /// </summary>
+        private static Queue<Action> resolutionJobs = new Queue<Action>();
 
         /// <summary>
         /// Flag used to prevent re-entrant auto-resolution.
@@ -105,6 +249,11 @@ namespace GooglePlayServices
         /// Event which is fired when the bundle ID is updated.
         /// </summary>
         public static event EventHandler<BundleIdChangedEventArgs> BundleIdChanged;
+
+        /// <summary>
+        /// The value of GradlePrebuildEnabled before settings was changed.
+        /// </summary>
+        private static bool previousGradlePrebuildEnabled = false;
 
         /// <summary>
         /// The value of GradleBuildEnabled when PollBuildSystem() was called.
@@ -266,35 +415,30 @@ namespace GooglePlayServices
         /// </summary>
         internal static bool Initialized { get; private set; }
 
+        // Parses dependencies from XML dependency files.
+        private static AndroidXmlDependencies xmlDependencies = new AndroidXmlDependencies();
+
+        // Last error logged by LogDelegate().
+        private static string lastError = null;
+
         /// <summary>
         /// Initializes the <see cref="GooglePlayServices.PlayServicesResolver"/> class.
         /// </summary>
         static PlayServicesResolver()
         {
+            updateQueue = System.Collections.Queue.Synchronized(new System.Collections.Queue());
             if (EditorUserBuildSettings.activeBuildTarget == BuildTarget.Android)
             {
                 RegisterResolver(new ResolverVer1_1());
                 RegisterResolver(new GradlePreBuildResolver(), ResolverType.GradlePrebuild);
+                // Monitor Android dependency XML files to perform auto-resolution.
+                AddAutoResolutionFilePatterns(xmlDependencies.fileRegularExpressions);
 
                 svcSupport = PlayServicesSupport.CreateInstance(
                     "PlayServicesResolver",
                     EditorPrefs.GetString("AndroidSdkRoot"),
                     "ProjectSettings",
-                    logMessageWithLevel: (string message, PlayServicesSupport.LogLevel level) => {
-                        switch (level) {
-                            case PlayServicesSupport.LogLevel.Info:
-                                UnityEngine.Debug.Log(message);
-                                break;
-                            case PlayServicesSupport.LogLevel.Warning:
-                                UnityEngine.Debug.LogWarning(message);
-                                break;
-                            case PlayServicesSupport.LogLevel.Error:
-                                UnityEngine.Debug.LogError(message);
-                                break;
-                            default:
-                                break;
-                        }
-                    });
+                    logMessageWithLevel: LogDelegate);
 
                 EditorApplication.update -= AutoResolve;
                 EditorApplication.update += AutoResolve;
@@ -313,13 +457,39 @@ namespace GooglePlayServices
             EditorApplication.update += PollTargetDeviceAbi;
             EditorApplication.update -= InitializationComplete;
             EditorApplication.update += InitializationComplete;
+            EditorApplication.update -= PumpUpdateQueue;
+            EditorApplication.update += PumpUpdateQueue;
+
+            previousGradlePrebuildEnabled = GooglePlayServices.SettingsDialog.PrebuildWithGradle;
+
             OnSettingsChanged();
+        }
+
+        /// <summary>
+        /// Called from PlayServicesSupport to log a message.
+        /// </summary>
+        internal static void LogDelegate(string message, PlayServicesSupport.LogLevel level) {
+            switch (level) {
+                case PlayServicesSupport.LogLevel.Info:
+                    UnityEngine.Debug.Log(message);
+                    break;
+                case PlayServicesSupport.LogLevel.Warning:
+                    UnityEngine.Debug.LogWarning(message);
+                    break;
+                case PlayServicesSupport.LogLevel.Error:
+                    UnityEngine.Debug.LogError(message);
+                    lastError = message;
+                    break;
+                default:
+                    break;
+            }
         }
 
         /// <summary>
         /// Called from EditorApplication.update to signal the class has been initialized.
         /// </summary>
         private static void InitializationComplete() {
+            EditorApplication.update -= InitializationComplete;
             Initialized = true;
         }
 
@@ -387,6 +557,11 @@ namespace GooglePlayServices
         private static HashSet<string> importedAssetsSinceLastResolve = new HashSet<string>();
 
         /// <summary>
+        /// Queue of System.Action objects to execute on the main thread.
+        /// </summary>
+        internal static System.Collections.Queue updateQueue = null;
+
+        /// <summary>
         /// Add file patterns to monitor to trigger auto resolution.
         /// </summary>
         /// <param name="patterns">Set of file patterns to monitor to trigger auto
@@ -400,6 +575,7 @@ namespace GooglePlayServices
         /// triggered.
         /// </summary>
         private static void CheckImportedAssets() {
+            EditorApplication.update -= CheckImportedAssets;
             var filesToCheck = new HashSet<string>(importedAssetsSinceLastResolve);
             importedAssetsSinceLastResolve.Clear();
             bool resolve = false;
@@ -458,8 +634,7 @@ namespace GooglePlayServices
                 if (Resolver.AutomaticResolutionEnabled()) {
                     // Prevent resolution on the call to OnPostprocessAllAssets().
                     autoResolving = true;
-                    Resolve();
-                    autoResolving = false;
+                    Resolve(resolutionComplete: () => { autoResolving = false; });
                 } else if (!PlayServicesSupport.InBatchMode &&
                            GooglePlayServices.SettingsDialog.AutoResolutionDisabledWarning &&
                            PlayServicesSupport.GetAllDependencies().Count > 0) {
@@ -469,7 +644,7 @@ namespace GooglePlayServices
                         "With auto-resolution of Android dependencies disabled you must " +
                         "manually resolve dependencies using the " +
                         "\"Assets > Play Services Resolver > Android Resolver > " +
-                        "Resolve Client Jars\" menu item.\n\nFailure to resolve Android " +
+                        "Resolve\" menu item.\n\nFailure to resolve Android " +
                         "dependencies will result in an non-functional application.",
                         "Yes", "Not Now", "Silence Warning")) {
                         case 0:  // Yes
@@ -619,22 +794,117 @@ namespace GooglePlayServices
         }
 
         /// <summary>
+        /// Execute the next resolve job on the queue.
+        /// </summary>
+        private static void ExecuteNextResolveJob() {
+            Action nextJob = null;
+            lock (resolutionJobs) {
+                while (resolutionJobs.Count > 0) {
+                    // Remove any terminators from the queue.
+                    var job = resolutionJobs.Dequeue();
+                    if (job != null) {
+                        nextJob = job;
+                        // Keep an item in the queue to indicate resolution is in progress.
+                        resolutionJobs.Enqueue(null);
+                        break;
+                    }
+                }
+            }
+            if (nextJob != null) nextJob();
+        }
+
+        /// <summary>
+        /// Resolve dependencies.  If resolution is currently active this queues up the requested
+        /// resolution action to execute when the current resolution is complete.
+        /// </summary>
+        /// <param name="resolutionComplete">Delegate called when resolution is complete.</param>
+        /// <param name="forceResolution">Whether resolution should be executed when no dependencies
+        /// have changed.  This is useful if a dependency specifies a wildcard in the version
+        /// expression.</param>
+        private static void Resolve(Action resolutionComplete = null,
+                                    bool forceResolution = false) {
+            bool firstJob;
+            lock (resolutionJobs) {
+                firstJob = resolutionJobs.Count == 0;
+                resolutionJobs.Enqueue(() => {
+                        ResolveUnsafe(
+                            resolutionComplete: () => {
+                                resolutionComplete();
+                                ExecuteNextResolveJob();
+                            },
+                            forceResolution: forceResolution);
+                    });
+            }
+            if (firstJob) ExecuteNextResolveJob();
+        }
+
+        /// <summary>
         /// Resolve dependencies.
         /// </summary>
         /// <param name="resolutionComplete">Delegate called when resolution is complete.</param>
-        private static void Resolve(System.Action resolutionComplete = null)
+        /// <param name="forceResolution">Whether resolution should be executed when no dependencies
+        /// have changed.  This is useful if a dependency specifies a wildcard in the version
+        /// expression.</param>
+        private static void ResolveUnsafe(Action resolutionComplete = null,
+                                          bool forceResolution = false)
         {
+            JavaUtilities.CheckJdkForApiLevel();
+
             if (!buildConfigChanged) DeleteFiles(Resolver.OnBuildSettings());
+
+            xmlDependencies.ReadAll(PlayServicesSupport.Log);
+
+            if (forceResolution) {
+                DeleteLabeledAssets();
+            } else {
+                // Only resolve if user specified dependencies changed or the output files
+                // differ to what is present in the project.
+                var currentState = DependencyState.GetState();
+                var previousState = DependencyState.ReadFromFile();
+                if (previousState != null) {
+                    if (currentState.Equals(previousState)) {
+                        if (resolutionComplete != null) resolutionComplete();
+                        return;
+                    }
+                    // Delete all labeled assets to make sure we don't leave any stale transitive
+                    // dependencies in the project.
+                    DeleteLabeledAssets();
+                }
+            }
+
             System.IO.Directory.CreateDirectory(GooglePlayServices.SettingsDialog.PackageDir);
+            PlayServicesSupport.Log("Resolving...", verbose: true);
+
+            lastError = "";
             Resolver.DoResolution(svcSupport, GooglePlayServices.SettingsDialog.PackageDir,
                                   (oldDependency, newDependency) => {
                                       return Resolver.ShouldReplaceDependency(oldDependency,
                                                                               newDependency);
                                   },
                                   () => {
-                                      AssetDatabase.Refresh();
-                                      if (resolutionComplete != null) resolutionComplete();
+                                      System.Action complete = () => {
+                                          bool succeeded = String.IsNullOrEmpty(lastError);
+                                          AssetDatabase.Refresh();
+                                          DependencyState.GetState().WriteToFile();
+                                          PlayServicesSupport.Log(String.Format(
+                                              "Resolution {0}.\n\n{1}",
+                                              succeeded ? "Complete" : "Failed",
+                                              lastError), verbose: true);
+                                          if (resolutionComplete != null) resolutionComplete();
+                                      };
+                                      updateQueue.Enqueue(complete);
                                   });
+        }
+
+        /// <summary>
+        /// Refreshes the asset database on the main thread when refreshAssetDatabaseComplete
+        /// is set.
+        /// </summary>
+        private static void PumpUpdateQueue() {
+            while (updateQueue.Count > 0) {
+                var action = (System.Action)updateQueue.Dequeue();
+                action();
+            }
         }
 
         /// <summary>
@@ -665,23 +935,46 @@ namespace GooglePlayServices
         }
 
         /// <summary>
-        /// Add a menu item for resolving the jars manually.
+        /// Interactive resolution of dependencies.
         /// </summary>
-        [MenuItem("Assets/Play Services Resolver/Android Resolver/Resolve Client Jars")]
-        public static void MenuResolve()
-        {
+        private static void ExecuteMenuResolve(bool forceResolution) {
             if (Resolver == null) {
                 NotAvailableDialog();
                 return;
             }
-            Resolve(() => { EditorUtility.DisplayDialog("Android Jar Dependencies",
-                                                        "Resolution Complete", "OK"); });
+            Resolve(
+                resolutionComplete: () => {
+                        EditorUtility.DisplayDialog("Android Jar Dependencies",
+                                                    "Resolution Complete", "OK");
+                },
+                forceResolution: forceResolution);
+        }
+
+        /// <summary>
+        /// Add a menu item for resolving the jars manually.
+        /// </summary>
+        [MenuItem("Assets/Play Services Resolver/Android Resolver/Resolve")]
+        public static void MenuResolve() {
+            ExecuteMenuResolve(false);
+        }
+
+        /// <summary>
+        /// Add a menu item to force resolve the jars manually.
+        /// </summary>
+        [MenuItem("Assets/Play Services Resolver/Android Resolver/Force Resolve")]
+        public static void MenuForceResolve() {
+            ExecuteMenuResolve(true);
         }
 
         /// <summary>
         /// Called when settings change.
         /// </summary>
         internal static void OnSettingsChanged() {
+            if (previousGradlePrebuildEnabled !=
+                GooglePlayServices.SettingsDialog.PrebuildWithGradle) {
+                DeleteLabeledAssets();
+            }
+            previousGradlePrebuildEnabled = GooglePlayServices.SettingsDialog.PrebuildWithGradle;
             PlayServicesSupport.verboseLogging = GooglePlayServices.SettingsDialog.VerboseLogging;
             if (Initialized) {
                 if (Resolver != null) AutoResolve();
@@ -691,7 +984,8 @@ namespace GooglePlayServices
         /// <summary>
         /// Handles the overwrite confirmation.
         /// </summary>
-        /// <returns><c>true</c>, if overwrite confirmation was handled, <c>false</c> otherwise.</returns>
+        /// <returns><c>true</c>, if overwrite confirmation was handled,
+        /// <c>false</c> otherwise.</returns>
         /// <param name="oldDep">Old dependency.</param>
         /// <param name="newDep">New dependency replacing old.</param>
         public static bool HandleOverwriteConfirmation(Dependency oldDep, Dependency newDep)
@@ -774,6 +1068,19 @@ namespace GooglePlayServices
             foreach (string assetGuid in AssetDatabase.FindAssets("l:" + ManagedAssetLabel)) {
                 yield return AssetDatabase.GUIDToAssetPath(assetGuid);
             }
+        }
+
+        /// <summary>
+        /// Delete the full set of assets managed from this plugin.
+        /// This is used for uninstalling or switching between resolvers which maintain a different
+        /// set of assets.
+        /// </summary>
+        internal static void DeleteLabeledAssets() {
+            foreach (var assetPath in PlayServicesResolver.FindLabeledAssets()) {
+                PlayServicesSupport.DeleteExistingFileOrDirectory(assetPath,
+                                                                  includeMetaFiles: true);
+            }
+            AssetDatabase.Refresh();
         }
     }
 }

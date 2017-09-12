@@ -39,6 +39,13 @@ namespace GooglePlayServices
             public string stderr;
             /// Exit code returned by the tool when execution is complete.
             public int exitCode;
+            /// String that can be used in an error message.
+            /// This contains:
+            /// * The command executed.
+            /// * Standard output string.
+            /// * Standard error string.
+            /// * Exit code.
+            public string message;
         };
 
         /// <summary>
@@ -507,17 +514,43 @@ namespace GooglePlayServices
         /// both output and error streams from a single delegate.</param>
         /// <param name="useShellExecution">Execute the command via the shell.  This disables
         /// I/O redirection and causes a window to be popped up when the command is executed.
+        /// This uses file redirection to retrieve the standard output stream.
         /// </param>
         /// <returns>CommandLineTool result if successful, raises an exception if it's not
         /// possible to execute the tool.</returns>
         public static Result RunViaShell(
                 string toolPath, string arguments, string workingDirectory = null,
                 Dictionary<string, string> envVars = null,
-                IOHandler ioHandler = null, bool useShellExecution = false) {
+                IOHandler ioHandler = null, bool useShellExecution = false,
+                bool stdoutRedirectionInShellMode = true) {
             System.Text.Encoding inputEncoding = Console.InputEncoding;
             System.Text.Encoding outputEncoding = Console.OutputEncoding;
             Console.InputEncoding = System.Text.Encoding.UTF8;
             Console.OutputEncoding = System.Text.Encoding.UTF8;
+
+            string stdoutFileName = null;
+            string stderrFileName = null;
+            if (useShellExecution && stdoutRedirectionInShellMode) {
+                stdoutFileName = Path.GetTempFileName();
+                stderrFileName = Path.GetTempFileName();
+                string shellCmd ;
+                string shellArgPrefix;
+                string shellArgPostfix;
+                if (UnityEngine.RuntimePlatform.WindowsEditor ==
+                    UnityEngine.Application.platform) {
+                    shellCmd = "cmd.exe";
+                    shellArgPrefix = "/c";
+                    shellArgPostfix = "";
+                } else {
+                    shellCmd = "bash";
+                    shellArgPrefix = "-l -c '";
+                    shellArgPostfix = "'";
+                }
+                arguments = String.Format("{0}{1} {2} 1> {3} 2> {4}{5}", shellArgPrefix,
+                                          toolPath, arguments, stdoutFileName, stderrFileName,
+                                          shellArgPostfix);
+                toolPath = shellCmd;
+            }
 
             Process process = new Process();
             process.StartInfo.UseShellExecute = useShellExecution;
@@ -551,6 +584,12 @@ namespace GooglePlayServices
 
             if (useShellExecution) {
                 process.WaitForExit();
+                if (stdoutRedirectionInShellMode) {
+                    stdouterr[0].Add(File.ReadAllText(stdoutFileName));
+                    stdouterr[1].Add(File.ReadAllText(stderrFileName));
+                    File.Delete(stdoutFileName);
+                    File.Delete(stderrFileName);
+                }
             } else {
                 AutoResetEvent complete = new AutoResetEvent(false);
                 // Read raw output from the process.
@@ -575,6 +614,8 @@ namespace GooglePlayServices
             result.stdout = String.Join("", stdouterr[0].ToArray());
             result.stderr = String.Join("", stdouterr[1].ToArray());
             result.exitCode = process.ExitCode;
+            result.message = FormatResultMessage(toolPath, arguments, result.stdout,
+                                                 result.stderr, result.exitCode);
             Console.InputEncoding = inputEncoding;
             Console.OutputEncoding = outputEncoding;
             return result;
@@ -587,6 +628,28 @@ namespace GooglePlayServices
         public static string[] SplitLines(string multilineString)
         {
             return Regex.Split(multilineString, "\r\n|\r|\n");
+        }
+
+        /// <summary>
+        /// Format a command excecution error message.
+        /// </summary>
+        /// <param name="toolPath">Tool executed.</param>
+        /// <param name="arguments">Arguments used to execute the tool.</param>
+        /// <param name="stdout">Standard output stream from tool execution.</param>
+        /// <param name="stderr">Standard error stream from tool execution.</param>
+        /// <param name="exitCode">Result of the tool.</param>
+        private static string FormatResultMessage(string toolPath, string arguments,
+                                                  string stdout, string stderr,
+                                                  int exitCode) {
+            return String.Format(
+                "{0} '{1} {2}'\n" +
+                "stdout:\n" +
+                "{3}\n" +
+                "stderr:\n" +
+                "{4}\n" +
+                "exit code: {5}\n",
+                exitCode == 0 ? "Successfully executed" : "Failed to run",
+                toolPath, arguments, stdout, stderr, exitCode);
         }
 
 #if UNITY_EDITOR

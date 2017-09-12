@@ -65,15 +65,17 @@ namespace Google.JarResolver
         /// artifact.</param>
         /// <param name="repositories">List of additional repository directories to search for
         /// this artifact.</param>
+        /// <param name="createdBy">Human readable string that describes where this dependency
+        /// originated.</param>
         public Dependency(string group, string artifact, string version, string[] packageIds=null,
-                          string[] repositories=null)
+                          string[] repositories=null, string createdBy=null)
         {
             Group = group;
             Artifact = artifact;
             Version = version;
             PackageIds = packageIds;
             Repositories = repositories;
-            CreatedBy = System.Environment.StackTrace;
+            CreatedBy = createdBy ?? System.Environment.StackTrace;
         }
 
         /// <summary>
@@ -96,7 +98,7 @@ namespace Google.JarResolver
         }
 
         /// <summary>
-        /// Stack trace of the point where this was created.
+        /// Tag that indicates where this was created.
         /// </summary>
         internal string CreatedBy { get; private set; }
 
@@ -314,6 +316,11 @@ namespace Google.JarResolver
                 return string.IsNullOrEmpty(bestVersion) ||
                     versionToCheck.Equals(bestVersion) ||
                     IsGreater(versionToCheck, bestVersion);
+            }
+            // Strip the artifact type specifier from the constraint.
+            var artifactTypeIndex = versionConstraint.LastIndexOf("@");
+            if (artifactTypeIndex >= 0) {
+                versionConstraint = versionConstraint.Substring(0, artifactTypeIndex);
             }
             var versionConstraintComponents = versionConstraint.Split('.');
             var versionToCheckComponents = versionToCheck.Split('.');

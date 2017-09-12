@@ -34,6 +34,9 @@ namespace GooglePlayServices
     /// </remarks>
     public abstract class DefaultResolver : IResolver
     {
+        // Namespace for resources under the src/scripts directory embedded within this assembly.
+        protected const string EMBEDDED_RESOURCES_NAMESPACE = "PlayServicesResolver.scripts.";
+
         #region IResolver implementation
 
         /// <summary>
@@ -59,7 +62,7 @@ namespace GooglePlayServices
         /// <returns><c>true</c>, if resolution enabled was automaticed, <c>false</c> otherwise.</returns>
         public virtual bool AutomaticResolutionEnabled()
         {
-            return !SettingsDialog.PrebuildWithGradle && SettingsDialog.EnableAutoResolution;
+            return SettingsDialog.EnableAutoResolution;
         }
 
         /// <summary>
@@ -210,49 +213,6 @@ namespace GooglePlayServices
         }
 
         /// <summary>
-        /// Find a Java tool.
-        /// </summary>
-        /// <param name="toolName">Name of the tool to search for.</param>
-        private string FindJavaTool(string javaTool)
-        {
-            string javaHome = UnityEditor.EditorPrefs.GetString("JdkPath");
-            if (string.IsNullOrEmpty(javaHome))
-            {
-                javaHome = Environment.GetEnvironmentVariable("JAVA_HOME");
-            }
-            string toolPath;
-            if (javaHome != null)
-            {
-                toolPath = Path.Combine(
-                    javaHome, Path.Combine(
-                        "bin", javaTool + CommandLine.GetExecutableExtension()));
-                if (!File.Exists(toolPath))
-                {
-                    EditorUtility.DisplayDialog("Play Services Dependencies",
-                                                "JAVA_HOME environment references a directory (" +
-                                                javaHome + ") that does not contain " + javaTool +
-                                                " which is required to process Play Services " +
-                                                "dependencies.", "OK");
-                    throw new Exception("JAVA_HOME references incomplete Java distribution.  " +
-                                        javaTool + " not found.");
-                }
-            } else {
-                toolPath = CommandLine.FindExecutable(javaTool);
-                if (!File.Exists(toolPath))
-                {
-                    EditorUtility.DisplayDialog("Play Services Dependencies",
-                                                "Unable to find " + javaTool + " in the system " +
-                                                "path.  This tool is required to process Play " +
-                                                "Services dependencies.  Either set JAVA_HOME " +
-                                                "or add " + javaTool + " to the PATH variable " +
-                                                "to resolve this error.", "OK");
-                    throw new Exception(javaTool + " not found.");
-                }
-            }
-            return toolPath;
-        }
-
-        /// <summary>
         /// Create a temporary directory.
         /// </summary>
         /// <returns>If temporary directory creation fails, return null.</returns>
@@ -273,9 +233,8 @@ namespace GooglePlayServices
             return null;
         }
 
-        // store the AndroidManifest.xml in a temporary directory before processing it.
         /// <summary>
-        /// Extract an AAR to the specified directory.
+        /// Extract an AAR (or zip file) to the specified directory.
         /// </summary>
         /// <param name="aarFile">Name of the AAR file to extract.</param>
         /// <param name="extract_filenames">List of files to extract from the AAR.  If this array
@@ -289,7 +248,7 @@ namespace GooglePlayServices
                 string aarPath = Path.GetFullPath(aarFile);
                 string extractFilesArg = extractFilenames != null && extractFilenames.Length > 0 ?
                     " \"" + String.Join("\" \"", extractFilenames) + "\"" : "";
-                CommandLine.Result result = CommandLine.Run(FindJavaTool("jar"),
+                CommandLine.Result result = CommandLine.Run(JavaUtilities.JarBinaryPath,
                                                             "xvf " + "\"" + aarPath + "\"" +
                                                             extractFilesArg,
                                                             workingDirectory: outputDirectory);
@@ -317,7 +276,7 @@ namespace GooglePlayServices
             try {
                 string aarPath = Path.GetFullPath(aarFile);
                 CommandLine.Result result = CommandLine.Run(
-                    FindJavaTool("jar"),
+                    JavaUtilities.JarBinaryPath,
                     String.Format("cvf \"{0}\" -C \"{1}\" .", aarPath, inputDirectory));
                 if (result.exitCode != 0) {
                     Debug.LogError(String.Format("Error archiving {0}\n" +
@@ -363,6 +322,21 @@ namespace GooglePlayServices
         }
 
         /// <summary>
+        /// Gets the directory names of currently targeted ABIs.
+        /// </summary>
+        /// <returns>returns the hashset of directory names, ie. "x86".</returns>
+        internal HashSet<string> GetSelectedABIDirs(string currentAbi) {
+            var activeAbis = new HashSet<string>();
+            string abiDir;
+            if (UNITY_ABI_TO_NATIVE_LIBRARY_ABI_DIRECTORY.TryGetValue(currentAbi, out abiDir)) {
+                activeAbis.Add(abiDir);
+            } else {
+                activeAbis.UnionWith(UNITY_ABI_TO_NATIVE_LIBRARY_ABI_DIRECTORY.Values);
+            }
+            return activeAbis;
+        }
+
+        /// <summary>
         /// Explodes a single aar file.  This is done by calling the
         /// JDK "jar" command, then moving the classes.jar file.
         /// </summary>
@@ -374,6 +348,8 @@ namespace GooglePlayServices
         /// <returns>true if successful, false otherwise.</returns>
         internal virtual bool ProcessAar(string dir, string aarFile, bool antProject,
                                          out string abi) {
+            PlayServicesSupport.Log(String.Format("ProcessAar {0} {1} antProject={2}",
+                                                  dir, aarFile, antProject), verbose: true);
             abi = null;
             string workingDir = Path.Combine(dir, Path.GetFileNameWithoutExtension(aarFile));
             PlayServicesSupport.DeleteExistingFileOrDirectory(workingDir, includeMetaFiles: true);
@@ -391,10 +367,15 @@ namespace GooglePlayServices
 
                 // Move the classes.jar file to libs.
                 string classesFile = Path.Combine(workingDir, "classes.jar");
+                string targetClassesFile = Path.Combine(libDir, Path.GetFileName(classesFile));
+                if (File.Exists(targetClassesFile)) File.Delete(targetClassesFile);
                 if (File.Exists(classesFile)) {
-                    string targetClassesFile = Path.Combine(libDir, Path.GetFileName(classesFile));
-                    if (File.Exists(targetClassesFile)) File.Delete(targetClassesFile);
                     File.Move(classesFile, targetClassesFile);
+                } else {
+                    // Generate an empty classes.jar file.
+                    string temporaryDirectory = CreateTemporaryDirectory();
+                    if (temporaryDirectory == null) return false;
+                    ArchiveAar(targetClassesFile, temporaryDirectory);
                 }
             }
 
@@ -411,14 +392,8 @@ namespace GooglePlayServices
                 }
                 // Remove shared libraries for all ABIs that are not required for the selected
                 // target ABI.
-                var activeAbis = new HashSet<string>();
-                var currentAbi = PlayServicesResolver.AndroidTargetDeviceAbi.ToLower();
-                foreach (var kv in UNITY_ABI_TO_NATIVE_LIBRARY_ABI_DIRECTORY) {
-                    if (currentAbi == kv.Key) activeAbis.Add(kv.Value);
-                }
-                if (activeAbis.Count == 0) {
-                    activeAbis.UnionWith(UNITY_ABI_TO_NATIVE_LIBRARY_ABI_DIRECTORY.Values);
-                }
+                var currentAbi = PlayServicesResolver.AndroidTargetDeviceAbi;
+                var activeAbis = GetSelectedABIDirs(currentAbi);
                 foreach (var directory in Directory.GetDirectories(nativeLibsDir)) {
                     var abiDir = Path.GetFileName(directory);
                     if (!activeAbis.Contains(abiDir)) {
@@ -457,6 +432,37 @@ namespace GooglePlayServices
                                                                   includeMetaFiles: true);
             }
             return true;
+        }
+
+        /// <summary>
+        /// Extract a list of embedded resources to the specified path creating intermediate
+        /// directories if they're required.
+        /// </summary>
+        /// <param name="resourceNameToTargetPath">Each Key is the resource to extract and each
+        /// Value is the path to extract to.</param>
+        protected static void ExtractResources(List<KeyValuePair<string, string>>
+                                                   resourceNameToTargetPaths) {
+            foreach (var kv in resourceNameToTargetPaths) ExtractResource(kv.Key, kv.Value);
+        }
+
+        /// <summary>
+        /// Extract an embedded resource to the specified path creating intermediate directories
+        /// if they're required.
+        /// </summary>
+        /// <param name="resourceName">Name of the resource to extract.</param>
+        /// <param name="targetPath">Target path.</param>
+        protected static void ExtractResource(string resourceName, string targetPath) {
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath));
+            var stream = typeof(GooglePlayServices.ResolverVer1_1).Assembly.
+                GetManifestResourceStream(resourceName);
+            if (stream == null) {
+                UnityEngine.Debug.LogError(String.Format("Failed to find resource {0} in assembly",
+                                                         resourceName));
+                return;
+            }
+            var data = new byte[stream.Length];
+            stream.Read(data, 0, (int)stream.Length);
+            File.WriteAllBytes(targetPath, data);
         }
     }
 }

@@ -1,3 +1,215 @@
+# Version 1.2.47 - Aug 29, 2017
+## New Features
+* Android and iOS dependencies can now be specified using *Dependencies.xml
+  files.  This is now the preferred method for registering dependencies,
+  we may remove the API for dependency addition in future.
+* Added "Reset to Defaults" button to each settings dialog to restore default
+  settings.
+* Android Resolver now validates the configured JDK is new enough to build
+  recently released Android libraries.
+## Bug Fixes
+* Fixed a bug that caused dependencies with the "LATEST" version specification
+  to be ignored when using the Gradle mode of the Android Resolver.
+* Fixed a race condition when running Android Resolution.
+* Fixed Android Resolver logging if a PlayServicesSupport instance is created
+  with no logging enabled before the Android Resolver is initialized.
+* Fixed iOS resolver dialog in Unity 4.
+* Fixed iOS Cocoapod Xcode project integration in Unity 4.
+
+# Version 1.2.46 - Aug 22, 2017
+## Bug Fixes
+* GradlePrebuild Android resolver on Windows now correctly locates dependent
+  data files.
+
+# Version 1.2.45 - Aug 22, 2017
+## Bug Fixes
+* Improved Android package auto-resolution and fixed clean up of stale
+  dependencies when using Gradle dependency resolution.
+
+# Version 1.2.44 - Aug 21, 2017
+## Bug Fixes
+* Enabled autoresolution for Gradle Prebuild.
+* Made the command line dialog windows have selectable text.
+* Fixed incorrect "Android Settings" dialog disabled groups.
+* Updated PlayServicesResolver android platform detection to use the package
+  manager instead of the 'android' tool.
+* UnityCompat reflection methods 'GetAndroidPlatform' and
+  'GetAndroidBuildToolsVersion' are now Obsolete due to dependence on the
+  obsolete 'android' build tool.
+
+# Version 1.2.43 - Aug 18, 2017
+## Bug Fixes
+* Fixed Gradle resolution in the Android Resolver when running
+  PlayServicesResolver.Resolve() in parallel or spawning multiple
+  resolutions before the previous resolve completed.
+
+# Version 1.2.42 - Aug 17, 2017
+## Bug Fixes
+* Fixed Xcode project level settings not being applied by IOS Resolver when
+  Xcode project pod integration is enabled.
+
+# Version 1.2.41 - Aug 15, 2017
+## Bug Fixes
+* IOS Resolver's Xcode workspace pod integration is now disabled when Unity
+  Cloud Build is detected.  Unity Cloud Build does not follow the same build
+  process as the Unity editor and fails to open the generated xcworkspace at
+  this time.
+
+# Version 1.2.40 - Aug 15, 2017
+## Bug Fixes
+* Moved Android Resolver Gradle Prebuild scripts into Google.JarResolver.dll.
+  They are now extracted from the DLL when required.
+* AARs / JARs are now cleaned up when switching the Android resolution
+  strategy.
+
+# Version 1.2.39 - Aug 10, 2017
+## New Features
+* Android Resolver now supports resolution with Gradle.  This enables support
+  for non-local artifacts.
+## Bug Fixes
+* Android Resolver's Gradle Prebuild now uses Android build tools to determine
+  the Android platform tools version rather than relying upon internal Unity
+  APIs.
+* Android Resolver's Gradle Prebuild now correctly strips binaries that are
+  not required for the target ABI.
+
+# Version 1.2.38 - Aug 7, 2017
+## Bug Fixes
+* Fixed an issue in VersionHandler where disabled targets are ignored if
+  the "Any Platform" flag is set on a plugin DLL.
+
+# Version 1.2.37 - Aug 3, 2017
+## New Features
+* Exposed GooglePlayServices.PlayServicesResolver.Resolve() so that it's
+  possible for a script to be notified when AAR / Jar resolution is complete.
+  This makes it easier to setup a project to build from the command line.
+
+# Version 1.2.36 - Aug 3, 2017
+## New Features
+* VersionHandler.UpdateCompleteMethods allows a user to provide a list of
+  methods to be called when VersionHandlerImpl has completed an update.
+  This makes it easier to import a plugin and wait for VersionHandler to
+  execute prior executing a build.
+
+# Version 1.2.35 - Jul 28, 2017
+## New Features
+* VersionHandler will now rename Linux libraries so they can target Unity
+  versions that require different file naming.  Libraries need to be labelled
+  gvh_linuxlibname-${basename} in order to be considered for renaming.
+  e.g gvh\_linuxlibname-MyLib will be named MyLib.so in Unity 5.5 and below and
+  libMyLib.so in Unity 5.6 and above.
+
+# Version 1.2.34 - Jul 28, 2017
+## Bug Fixes
+* Made VersionHandler bootstrap module more robust when calling static
+  methods before the implementation DLL is loaded.
+
+# Version 1.2.33 - Jul 27, 2017
+## New Features
+* Added a bootstrap module for VersionHandler so the implementation
+  of the VersionHandler module can be versioned without resulting in
+  a compile error when imported at different versions across multiple
+  plugins.
+
+# Version 1.2.32 - Jul 20, 2017
+## New Features
+* Added support for build target selection based upon .NET framework
+  version in the VersionHandler.
+  When appling either gvh\_dotnet-3.5 or gvh\_dotnet-4.5 labels to
+  assets, the VersionHandler will only enable the asset for the
+  specified set of build targets when the matching .NET framework version
+  is selected in Unity 2017's project settings.  This allows assets
+  to be provided in a plugin that need to differ based upon .NET version.
+
+# Version 1.2.31 - Jul 5, 2017
+## Bug Fixes
+* Force expansion of AARs with native components when using Unity 2017
+  with the internal build system.  In contrast to Unity 5.x, Unity 2017's
+  internal build system does not include native libraries included in AARs.
+  Forcing expansion of AARs with native components generates an
+  Ant / Eclipse project for each AAR which is correctly included by Unity
+  2017's internal build system.
+
+# Version 1.2.30 - Jul 5, 2017
+## Bug Fixes
+* Fixed Cocoapods being installed when the build target isn't iOS.
+* Added support for malformed AARs with missing classes.jar.
+
+# Version 1.2.29 - Jun 16, 2017
+## New Features
+* Added support for the Android sdkmanager tool.
+
+# Version 1.2.28 - Jun 8, 2017
+## Bug Fixes
+* Fixed non-shell command line execution (regression from
+  Cocoapod installation patch).
+
+# Version 1.2.27 - Jun 7, 2017
+## Bug Fixes
+* Added support for stdout / stderr redirection when executing
+  commands in shell mode.
+  This fixes CocoaPod tool installation when shell mode is
+  enabled.
+* Fixed incremental builds when additional sources are specified
+  in the Podfile.
+
+# Version 1.2.26 - Jun 7, 2017
+## Bug Fixes
+* Fixed a crash when importing Version Handler into Unity 4.7.x.
+
+# Version 1.2.25 - Jun 7, 2017
+## Bug Fixes
+* Fixed an issue in the Jar Resolver which incorrectly notified
+  event handlers of bundle ID changes when the currently selected
+  (not active) build target changed in Unity 5.6 and above.
+
+# Version 1.2.24 - Jun 6, 2017
+## New Features
+* Added option to control file renaming in Version Handler settings.
+  Disabling file renaming (default option) significantly increases
+  the speed of file version management operations with the downside
+  that any files that are referenced directly by canonical filename
+  rather than asset ID will no longer be valid.
+* Improved logging in the Version Handler.
+## Bug Fixes
+* Fixed an issue in the Version Handler which caused it to not
+  re-enable plugins when re-importing a custom package with disabled
+  version managed files.
+
+# Version 1.2.23 - May 26, 2017
+## Bug Fixes
+* Fixed a bug with gradle prebuild resolver on windows.
+
+# Version 1.2.22 - May 19, 2017
+## Bug Fixes
+* Fixed a bug in the iOS resolver with incremental builds.
+* Fixed misdetection of Cocoapods support with Unity beta 5.6.
+
+# Version 1.2.21 - May 8, 2017
+## Bug Fixes
+* Fix for https://github.com/googlesamples/unity-jar-resolver/issues/48
+  Android dependency version number parsing when "-alpha" (etc.) are
+  included in dependency (AAR / JAR) versions.
+
+# Version 1.2.20 - May 8, 2017
+## Bug Fixes
+* Attempted to fix
+  https://github.com/googlesamples/unity-jar-resolver/issues/48
+  where a NullReferenceException could occur if a target file does not
+  have a valid version string.
+
+# Version 1.2.19 - May 4, 2017
+## Bug Fixes
+* Fixed Jar Resolver exploding and deleting AAR files it isn't managing.
+
+# Version 1.2.18 - May 4, 2017
+## New Features
+* Added support for preserving Unity pods such as when GVR is enabled.
+
+# Version 1.2.17 - Apr 20, 2017
+## Bug Fixes
+* Fixed auto-resolution when an Android application ID is modified.
+
 # Version 1.2.16 - Apr 17, 2017
 ## Bug Fixes
 * Fixed Unity version number parsing on machines with a locale that uses
